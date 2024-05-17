@@ -5,17 +5,17 @@ name = "pypi"
 
 [packages]
 rich-click = "*"
-securesystemslib = "*"
+securesystemslib = ">=0.31.0,<1.0.0"
 click = "*"
 rich = "*"
 auto-click-auto = "*"
 PyNaCl = "==1.5.0"
 requests = "*"
-tuf = "==3.1.0"
 dynaconf = {extras = ["yaml"], version = "*"}
 isort = "*"
 sqlalchemy = "*"
 psycopg2 = "*"
+tuf = "*"
 
 [dev-packages]
 black = "*"
@@ -45,4 +45,4 @@ bandit = "*"
 types-requests = "*"
 
 [requires]
-python_version = "3.9"
+python_version = "3.12"

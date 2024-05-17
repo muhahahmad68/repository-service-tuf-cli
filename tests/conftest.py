@@ -2,15 +2,22 @@
 #
 # SPDX-License-Identifier: MIT
 
+import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Tuple
 
+import pretend
 import pytest  # type: ignore
-from click.testing import CliRunner  # type: ignore
+from click.testing import CliRunner, Result  # type: ignore
+from cryptography.hazmat.primitives.serialization import (
+    load_pem_private_key,
+    load_pem_public_key,
+)
 from dynaconf import Dynaconf
-from securesystemslib.signer import SSlibKey as Key
+from securesystemslib.signer import CryptoSigner, SSlibKey
 from tuf.api.metadata import Metadata, Root
 
 from repository_service_tuf.helpers.tuf import (
@@ -18,9 +25,17 @@ from repository_service_tuf.helpers.tuf import (
     MetadataInfo,
     Roles,
     RSTUFKey,
-    ServiceSettings,
     TUFManagement,
 )
+
+_FILES = Path(os.path.dirname(__file__)) / "files"
+_ROOTS = _FILES / "root"
+_PEMS = _FILES / "key_storage"
+_PAYLOADS = _FILES / "payload"
+
+# Constants for mocking:
+_HELPERS = "repository_service_tuf.cli.admin.helpers"
+_PROMPT = "rich.console.Console.input"
 
 
 @pytest.fixture
@@ -32,7 +47,7 @@ def test_context() -> Dict[str, Any]:
 
 @pytest.fixture
 def client() -> CliRunner:
-    runner = CliRunner()
+    runner = CliRunner(mix_stderr=False)
     return runner
 
 
@@ -46,12 +61,12 @@ def test_setup() -> BootstrapSetup:
             Roles.TIMESTAMP: 1,
             Roles.BINS: 1,
         },
-        services=ServiceSettings(),
         number_of_keys={Roles.ROOT: 2, Roles.TARGETS: 1},
         threshold={
             Roles.ROOT: 1,
             Roles.TARGETS: 1,
         },
+        number_of_delegated_bins=256,
         root_keys={},
         online_key=RSTUFKey(),
     )
@@ -75,7 +90,6 @@ def test_inputs() -> Tuple[List[str], List[str], List[str], List[str]]:
         "",  # What is the metadata expiration for the targets role?(Days) (365)?  # noqa
         "y",  # Show example?
         "16",  # Choose the number of delegated hash bin roles
-        "http://www.example.com/repository",  # What is the targets base URL
         "",  # What is the metadata expiration for the snapshot role?(Days) (365)?  # noqa
         "",  # What is the metadata expiration for the timestamp role?(Days) (365)?  # noqa
         "",  # What is the metadata expiration for the bins role?(Days) (365)?
@@ -112,19 +126,19 @@ def test_inputs() -> Tuple[List[str], List[str], List[str], List[str]]:
 
 @pytest.fixture
 def root() -> Metadata[Root]:
-    return Metadata(Root(expires=datetime.now()))
+    return Metadata(Root(expires=datetime.now(timezone.utc)))
 
 
 @pytest.fixture
 def root_info(root: Metadata[Root]) -> MetadataInfo:
     root_keys = [
-        Key("id1", "ed25519", "", {"sha256": "abc"}),
-        Key("id2", "ed25519", "", {"sha256": "foo"}),
+        SSlibKey("id1", "ed25519", "", {"sha256": "abc"}),
+        SSlibKey("id2", "ed25519", "", {"sha256": "foo"}),
     ]
     for key in root_keys:
         root.signed.add_key(key, "root")
 
-    online_key = Key("id3", "ed25519", "", {"sha256": "doo"})
+    online_key = SSlibKey("id3", "ed25519", "", {"sha256": "doo"})
     for online_role in ["timestamp", "snapshot", "targets"]:
         root.signed.add_key(online_key, online_role)
 
@@ -149,7 +163,7 @@ def md_update_input() -> Tuple[List[str], List[str], List[str], List[str]]:
         "y",  # Do you want to modify root keys? [y/n]
         "",  # What should be the root role threshold? (CURRENT_KEY_THRESHOLD)
         "y",  # Do you want to remove a key [y/n]
-        "Martin's Key",  # Name/Tag/ID prefix of the key to remove
+        "Janis Joplin",  # Name/Tag/ID prefix of the key to remove
         "n",  # Do you want to remove a key [y/n]
         "y",  # Do you want to add a new key? [y/n]
         "",  # Choose root key type [ed25519/ecdsa/rsa] (ed25519)
@@ -183,3 +197,68 @@ def metadata_sign_input() -> List[str]:
     ]
 
     return input
+
+
+@pytest.fixture
+def patch_getpass(monkeypatch):
+    """Fixture to mock password prompt return value for encrypted test keys.
+
+    NOTE: we need this, because getpass does not receive the inputs passed to
+    click's invoke method (interestingly, click's own password prompt, which
+    also uses getpass, does receive them)
+    """
+
+    fake_click = pretend.stub(
+        prompt=pretend.call_recorder(lambda *a, **kw: "hunter2")
+    )
+    monkeypatch.setattr(f"{_HELPERS}.click", fake_click)
+
+
+@pytest.fixture
+def patch_utcnow(monkeypatch):
+    """Patch `utcnow` in helpers module for reproducible results."""
+    fake_replace = pretend.stub(
+        replace=pretend.call_recorder(
+            lambda **kw: datetime(
+                2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc
+            )
+        )
+    )
+    fake_datetime = pretend.stub(
+        now=pretend.call_recorder(lambda *a: fake_replace)
+    )
+    monkeypatch.setattr(f"{_HELPERS}.datetime", fake_datetime)
+
+
+@pytest.fixture
+def ed25519_key():
+    with open(f"{_PEMS / 'JH.pub'}", "rb") as f:
+        public_pem = f.read()
+
+    public_key = load_pem_public_key(public_pem)
+    return SSlibKey.from_crypto(public_key, "fake_keyid")
+
+
+@pytest.fixture
+def ed25519_signer(ed25519_key):
+    with open(f"{_PEMS / 'JH.ed25519'}", "rb") as f:
+        private_pem = f.read()
+
+    private_key = load_pem_private_key(private_pem, b"hunter2")
+    return CryptoSigner(private_key, ed25519_key)
+
+
+def invoke_command(client, cmd, inputs, args) -> Result:
+    out_file_name = "out_file_.json"
+    with client.isolated_filesystem():
+        result_obj = client.invoke(
+            cmd,
+            args=args + ["-s", out_file_name],
+            input="\n".join(inputs),
+            catch_exceptions=False,
+        )
+
+        with open(out_file_name) as f:
+            result_obj.data = json.load(f)
+
+    return result_obj

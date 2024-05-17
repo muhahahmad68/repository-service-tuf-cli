@@ -1,9 +1,10 @@
+# SPDX-FileCopyrightText: 2023-2024 Repository Service for TUF Contributors
 # SPDX-FileCopyrightText: 2022-2023 VMware Inc
 #
 # SPDX-License-Identifier: MIT
 import copy
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from rich import align, box, markdown, prompt, table, text
@@ -13,7 +14,7 @@ from tuf.api.metadata import Metadata, Root
 from tuf.api.serialization import DeserializationError
 
 from repository_service_tuf.cli import click, console
-from repository_service_tuf.cli.admin import admin
+from repository_service_tuf.cli.admin_legacy import admin_legacy as admin
 from repository_service_tuf.helpers.api_client import (
     URL,
     Methods,
@@ -348,7 +349,9 @@ def _modify_expiration(root_info: MetadataInfo):
             f"Current root expiration: [cyan]{root_info.expiration_str}[/]",
             highlight=False,  # disable built-in rich highlight
         )
-        if root_info.expiration < (datetime.now() + timedelta(days=1)):
+        if root_info.expiration < (
+            datetime.now(timezone.utc) + timedelta(days=1)
+        ):
             console.print("Root root has expired - expiration must be extend")
             change = True
 
@@ -363,7 +366,7 @@ def _modify_expiration(root_info: MetadataInfo):
         else:
             m = "Days to extend [cyan]root's expiration[/] starting from today"
             bump = _get_positive_int_input(m, "Expiration extension", 365)
-            new_expiry = datetime.now() + timedelta(days=bump)
+            new_expiry = datetime.now(timezone.utc) + timedelta(days=bump)
             new_exp_str = new_expiry.strftime("%Y-%b-%d")
             agree = prompt.Confirm.ask(
                 f"New root expiration: [cyan]{new_exp_str}[/]. Do you agree?"
